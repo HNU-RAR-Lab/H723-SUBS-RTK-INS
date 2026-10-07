@@ -1,0 +1,31 @@
+# Keil MDK build output
+SUBS/MDK-ARM/SUBS/
+SUBS/MDK-ARM/*.uvguix.*
+SUBS/MDK-ARM/*.lst
+SUBS/MDK-ARM/rebuild_log.txt
+SUBS/MDK-ARM/JLinkLog.txt
+*.uvguix.*
+*.bak
+*.crf
+*.o
+*.d
+*.axf
+*.hex
+*.bin
+*.elf
+*.map
+*.lnp
+*.htm
+*.dep
+ExtDll.iex
+
+# Nested INSLIB clone metadata (source files are still tracked)
+Middlewares/INSLIB/.git/
+Middlewares/INSLIB/_git_nested/
+
+# Cube/Keil downloaded packs
+pack_download/
+
+# OS
+Thumbs.db
+.DS_Store

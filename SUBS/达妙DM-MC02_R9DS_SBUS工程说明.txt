@@ -1,0 +1,457 @@
+================================================================================
+     达妙 DM-MC02 开发板 + Radiolink R9DS SBUS 接收工程说明（当前版本）
+================================================================================
+
+工程名称：SUBS
+工程路径：H723-SUBS\SUBS
+主控芯片：STM32H723VGT6（LQFP100）
+开发板型号：达妙 DM-MC02（DM-MC-Board02）
+遥控器接收机：Radiolink R9DS（SBUS 输出）
+开发工具：STM32CubeMX 6.17.0 + Keil MDK-ARM V5.32
+固件包版本：STM32Cube FW_H7 V1.13.0
+配置文件：SUBS.ioc
+板级资料：https://gitee.com/kit-miao/dm-mc02
+
+编写目的：根据当前 CubeMX 配置与工程代码，说明硬件接线、外设参数、
+          软件数据流、SBUS 组帧方式及 Keil 调试方法。
+
+
+================================================================================
+一、工程功能概述
+================================================================================
+
+本工程在达妙 DM-MC02 开发板上，通过板载 SUBS/SBUS 接口接收 R9DS 遥控
+接收机的 SBUS 信号，解析出 16 路遥控通道；并通过 USART10 向电脑打印调试
+信息（可选）。
+
+信号流向：
+
+    R9DS 接收机（9/S.B 口，反相 SBUS）
+            |
+            v
+    板载 SUBS 座（原理图含硬件反相电路）
+            |
+            v
+    STM32 UART5_RX（PD2），100000 波特率，8E2，软件 RXINV 关闭
+            |
+            v
+    DMA1_Stream0 循环写入 sbus_dma_buf（128 字节，AXI SRAM）
+            |
+            v
+    主循环 SBUS_PollFromUart → 25 字节滑动窗口组帧
+            |
+            v
+    SBUS_ParseFrame → sbus_data.channels[0..15]
+            |
+            v
+    USART10（PE3）115200 打印 / Keil Watch 观察
+
+
+================================================================================
+二、硬件平台与接线
+================================================================================
+
+2.1 开发板主要参数
+
+    项目              参数
+    --------------------------------------------------------
+    主控 MCU          STM32H723VGT6，Cortex-M7
+    板载晶振          24MHz（PH0/PH1）
+    板载 IMU          BMI088（SPI2，与本工程 SBUS 无引脚冲突）
+    SBUS/SUBS 接口    板载插座，信号至 MCU 的 PD2（UART5_RX）
+    供电              开发板 12V～24V；接收机独立 4.8V～10V 供电
+
+2.2 本工程使用的引脚
+
+    功能              外设        引脚        说明
+    --------------------------------------------------------
+    SBUS 接收         UART5       PD2（RX）   接板载 SUBS/SBUS 座
+    SBUS 发送（未用） UART5       PC12（TX）  板级已连接，本工程仅接收
+    调试串口发送      USART10     PE3（TX）   接 USB-TTL 的 RX（可选）
+    调试串口接收      USART10     PE2（RX）   可选
+    PWM 输出 CH1      TIM2_CH1    PA0         channels_norm[0]，50Hz
+    PWM 输出 CH2      TIM2_CH3    PA2         channels_norm[3]，50Hz
+    程序下载调试      SWD         PA13/PA14   ST-Link
+    外部晶振          HSE         PH0/PH1     24MHz
+
+2.3 R9DS 接收机要求
+
+    项目                      要求
+    --------------------------------------------------------
+    工作模式                  SBUS 模式（指示灯蓝/紫色）
+    模式切换                  1 秒内连按 ID SET 键两次
+    对频                      必须与遥控器成功对频
+    接线                      9/S.B 信号线 → 板载 SUBS 座
+    共地                      接收机 GND 与开发板 GND 必须相连
+    供电                      接收机勿用板子 3.3V 强供，应独立供电
+
+2.4 关于电平反相（重要）
+
+    R9DS 输出为反相 TTL SBUS。达妙 DM-MC02 板载 SUBS 座前通常已有
+    硬件反相电路，因此 PD2 上已是“标准 UART 逻辑”。
+
+    本工程配置：
+      CubeMX：UART5 → RX Pin Level Inversion = Disable
+      代码：CLEAR_BIT(UART5->CR2, USART_CR2_RXINV)
+
+    MCU 内 DMA 缓冲区应看到：
+      帧头 0x0F，帧尾 0x00，每帧 25 字节
+
+    若 USB-TTL 直连 R9DS 原始信号（不经板子反相），会看到帧头 0xF8。
+    本工程按板载 SUBS 座接线，以 0x0F 组帧，不再开启软件 RXINV，
+    避免“硬件反相 + 软件反相”导致双重反相（缓冲里又变成 0xF8）。
+
+
+================================================================================
+三、CubeMX 配置摘要（SUBS.ioc）
+================================================================================
+
+3.1 芯片与工程
+
+    项目                      设置值
+    --------------------------------------------------------
+    MCU                       STM32H723VGTx，LQFP100
+    CubeMX 版本               6.17.0
+    固件包                    STM32Cube FW_H7 V1.13.0
+    工具链                    MDK-ARM V5.32
+    堆栈                      Stack 0x400，Heap 0x200
+
+3.2 时钟树（RCC）
+
+    配置项                    设置值
+    --------------------------------------------------------
+    HSE                       24 MHz（Crystal/Ceramic）
+    PLL 源                    HSE
+    PLLM / PLLN / PLLP        6 / 100 / 2
+    SYSCLK                    200 MHz
+    HCLK / AHB                200 MHz
+    APB1（UART5 时钟源）      100 MHz（÷2）
+    APB2（USART10 时钟源）    100 MHz（÷2）
+    Flash Latency             2
+    电源                      LDO，Scale 1
+
+    频率计算：
+      PLL 输入 = 24 / 6 = 4 MHz
+      VCO      = 4 × 100 = 400 MHz
+      SYSCLK   = 400 / 2 = 200 MHz
+
+    注意：HSE 必须设为 24MHz，否则 100000 波特率会偏差导致 SBUS 无法解码。
+
+3.3 调试接口（DEBUG）
+
+    配置项                    设置值
+    --------------------------------------------------------
+    模式                      Serial Wire（SWD）
+    引脚                      PA13（SWDIO）、PA14（SWCLK）
+
+3.4 UART5（SBUS 接收）
+
+    配置项                    CubeMX / 代码实际值
+    --------------------------------------------------------
+    模式                      Asynchronous
+    波特率                    100000
+    字长                      9 Bits（= 8 数据位 + 偶校验）
+    校验                      Even
+    停止位                    2
+    方向                      Receive Only
+    RX 电平反相               Disable（UART_ADVFEATURE_RXINV_DISABLE）
+    引脚                      PD2 = UART5_RX，PC12 = UART5_TX
+    FIFO                      关闭（DisableFifoMode）
+
+    DMA（UART5_RX）：
+      通道        DMA1_Stream0
+      方向        Peripheral To Memory
+      模式        Circular（循环）
+      宽度        Byte / Byte
+      优先级      High
+
+    中断：
+      UART5_IRQn          开启
+      DMA1_Stream0_IRQn   开启
+
+3.5 USART10（调试打印）
+
+    配置项                    设置值
+    --------------------------------------------------------
+    波特率                    115200
+    字长 / 校验 / 停止位      8N1
+    方向                      Transmit and Receive
+    RX/TX 反相                关闭
+    DMA / 中断                不配置
+    引脚                      PE3 = TX，PE2 = RX
+
+3.6 TIM2（两路 50Hz PWM）
+
+    配置项                    设置值
+    --------------------------------------------------------
+    Clock Source              Internal Clock
+    Channel1 / 3              PWM Generation CH1 / CH3
+    Prescaler                 199（计数时钟 = 200MHz / 200 = 1MHz）
+    Counter Period (ARR)      19999（1MHz / 20000 = 50Hz）
+    Auto-reload preload       Enable
+    Pulse（初始）             10000（50% 占空比）
+    PWM mode                  PWM1，极性 High
+    引脚                      PA0=CH1←SBUS[0]，PA2=CH3←SBUS[3]
+
+    占空比映射（pwm.c）：
+      channels_norm = -1 → Pulse = 0      → 0%
+      channels_norm =  0 → Pulse = 10000  → 50%
+      channels_norm = +1 → Pulse = 20000  → 100%
+
+3.7 CubeMX 初始化顺序
+
+    1. SystemClock_Config
+    2. MX_GPIO_Init
+    3. MX_DMA_Init
+    4. MX_USART10_UART_Init
+    5. MX_UART5_Init
+    6. MX_TIM2_Init
+    随后用户代码：PWM_Init() 启动三路 PWM 并打开 DWT 微秒时基
+
+
+================================================================================
+四、Keil 工程与内存布局
+================================================================================
+
+4.1 编译器
+
+    项目                      设置值
+    --------------------------------------------------------
+    编译器                    ARMCC V5.06
+    优化等级                  -O3（Optim=4）
+    分散加载文件              MDK-ARM\stm32h723xx_flash.sct
+
+4.2 内存分区（scatter 文件）
+
+    区域          地址            用途
+    --------------------------------------------------------
+    ER_IROM1      0x08000000      程序 Flash
+    RW_IRAM1      0x20000000      DTCM，普通变量
+    RW_IRAM2      0x24000000      AXI SRAM，DMA 缓冲区
+
+4.3 DMA 缓冲区放置（关键）
+
+    变量：sbus_dma_buf[128]
+    属性：volatile，section("RAM_D1")，32 字节对齐
+
+    原因：STM32H7 的 DMA1/DMA2 无法访问 DTCM（0x20000000）。
+    若缓冲区落在 DTCM，DMA 写不进去，last_dma_pos 不变，无法解析。
+
+    验证：Keil Watch 中 &sbus_dma_buf 地址应以 0x2400 开头。
+
+
+================================================================================
+五、软件架构与源文件
+================================================================================
+
+5.1 源文件清单
+
+    文件                          作用
+    --------------------------------------------------------
+    Core/Src/main.c               入口、外设初始化、主循环、DMA 启动
+    Core/Src/sbus.c               SBUS 组帧、通道解包、调试打印
+    Core/Inc/sbus.h               协议常量、数据结构、函数声明
+    Core/Src/pwm.c                三路 PWM 占空比映射与收/发时间戳同步
+    Core/Inc/pwm.h                PWM 周期/预分频常量、pwm_sync 声明
+    Core/Src/stm32h7xx_hal_msp.c  UART5/USART10/TIM2 引脚、DMA、时钟
+    Core/Src/stm32h7xx_it.c       DMA1_Stream0、UART5、SysTick 中断
+    MDK-ARM/stm32h723xx_flash.sct  链接脚本（DMA 缓冲放 AXI SRAM）
+
+5.2 程序启动流程（main.c）
+
+    1. MPU_Config()
+    2. HAL_Init()
+    3. SystemClock_Config()        // HSE 24MHz → SYSCLK 200MHz
+    4. MX_GPIO_Init()
+    5. MX_DMA_Init()
+    6. MX_USART10_UART_Init()
+    7. MX_UART5_Init()             // 关 RXINV
+    8. MX_TIM2_Init()              // 50Hz PWM 三通道
+    9. PWM_Init()                  // 启动 PWM + DWT
+   10. Debug_Printf("SBUS+PWM init OK")
+   11. SBUS_StartDmaRx()
+   12. while(1) {
+         SBUS_PollFromUart()
+         PWM_SyncFromSbus()        // 新帧立即更新 CCR，时间戳对齐
+         每 100ms 打印通道与 RX/PWM 时间戳
+       }
+
+5.3 SBUS 接收与解析（sbus.c）
+
+    数据路径：
+      UART5 → DMA 循环缓冲 sbus_dma_buf
+           → SBUS_PollFromUart 读 NDTR 算写入位置
+           → SBUS_OnDmaIdle 取新增字节
+           → SBUS_FeedByte 25 字节滑动窗口
+           → 帧头 0x0F 且帧尾 0x00 时 SBUS_ParseFrame
+           → 更新 sbus_data
+
+    组帧算法（滑动窗口）：
+      维护 25 字节窗口，每收到 1 字节右移 1 位；
+      当 buf[0]==0x0F 且 buf[24]==0x00 时认为一帧有效并解包。
+      不把通道数据中的 0x0F 误当帧头。
+
+    SBUS 帧格式（MCU 内，反相已校正）：
+      [0x0F] + [22 字节通道数据] + [1 字节标志] + [0x00]
+      共 25 字节，约 100Hz 发送。
+
+    通道值：
+      16 路，每路 11 位，范围约 172～1811，中位约 992。
+      Keil Watch 默认十六进制显示，如 0x03E0 = 992。
+
+    标志字节 buf[23]：
+      bit2：frame_lost（丢帧）
+      bit3：failsafe（失控保护）
+
+5.4 中断与主循环分工
+
+    功能                    执行位置
+    --------------------------------------------------------
+    DMA 收字节              硬件 DMA（后台）
+    解帧、更新通道          主循环 SBUS_PollFromUart（唯一解帧路径）
+    空闲中断计数            HAL_UARTEx_RxEventCallback（仅 rx_event_cnt++）
+    串口打印                主循环，10Hz（100ms 一次）
+
+    说明：不在空闲中断里解帧，避免 HAL 的 Size 参数与 DMA 写入下标
+          不一致导致字节错位。
+
+
+================================================================================
+六、全局变量说明（Keil Watch）
+================================================================================
+
+6.1 通道数据 sbus_data
+
+    变量名                    类型        说明
+    --------------------------------------------------------
+    channels[0..15]           uint16_t    CH1～CH16 原始值
+    frame_lost                uint8_t     丢帧标志
+    failsafe                  uint8_t     失控保护（未对频/断链时常为 1）
+    updated                   uint8_t     新帧到达标志，打印后清零
+sbus_data.channels_norm  归一化后的变量数据
+
+6.2 调试统计 sbus_dbg
+
+    变量名                    说明
+    --------------------------------------------------------
+    dma_poll_cnt              主循环轮询次数
+    rx_event_cnt              空闲/DMA 中断次数（≠ 解帧成功次数）
+    frame_ok_cnt              成功解出完整帧的次数（应持续增加）
+    frame_err_cnt             帧头/帧尾校验失败次数
+    header_hit_cnt            滑动窗口对齐到 0x0F+0x00 的次数
+    uart_err_cnt              UART 错误回调次数
+    last_uart_err             最近 huart5.ErrorCode
+    last_dma_pos              DMA 写入下标（0～127 滚动）
+    last_header / last_footer  最近一帧头/尾（应为 0x0F / 0x00）
+    rxinv_hw                  UART5 CR2.RXINV 状态（本工程应为 0）
+    raw[25]                   最近一次送去解析的原始帧
+
+6.3 DMA 缓冲区
+
+    变量名                    说明
+    --------------------------------------------------------
+    sbus_dma_buf[128]         UART5 DMA 循环缓冲，volatile，在 AXI SRAM
+
+
+================================================================================
+七、调试与验证方法
+================================================================================
+
+7.1 Keil Debug 步骤
+
+    1. 编译 Download，点击 Run（F5），不要 Stop 着看 Watch
+    2. Watch 添加：
+         sbus_data.channels[0]～[3]
+         sbus_dbg.frame_ok_cnt
+         sbus_dbg.last_dma_pos
+         sbus_dbg.rxinv_hw
+         sbus_dbg.last_header
+         &sbus_dma_buf
+    3. 拨动摇杆，观察 channels 是否在约 172～1811 范围内变化
+
+7.2 正常指标
+
+    项目                      正常表现
+    --------------------------------------------------------
+    &sbus_dma_buf             地址 0x2400xxxx
+    rxinv_hw                  0（软件反相关闭）
+    last_dma_pos              0～127 持续滚动
+    sbus_dma_buf              周期性 0x0F … 0x00
+    frame_ok_cnt              约每秒 +100（杆任意位置）
+    last_header / last_footer 0x0F / 0x00
+    failsafe                  0（已对频且信号正常）
+    CH1～CH4                  随摇杆变化
+
+7.3 串口打印（可选）
+
+    接线：PE3（TX）→ USB-TTL RX，GND 共地
+    参数：115200，8N1
+    输出：每 100ms 一行 CH1～CH16 + FL + FS
+    启动时打印：SBUS init OK
+
+7.4 Debug 卡顿说明
+
+    Keil Watch 刷新会短暂停核，可能导致通道显示不跟手。
+    判断解析是否正常应看 frame_ok_cnt 是否持续增加，而非仅看 Watch 刷新率。
+    串口打印使用阻塞发送，每行约 15ms，不影响 DMA 收数，但限制打印为 10Hz。
+
+
+================================================================================
+八、常见问题排查
+================================================================================
+
+    现象                          可能原因              处理建议
+    --------------------------------------------------------
+    last_dma_pos 不变             DMA 缓冲在 DTCM       确认 scatter 与 RAM_D1
+    缓冲里是 F8 不是 0F           双重反相或无双反相    查 rxinv_hw；板子有硬件反相则关 RXINV
+    frame_ok_cnt 不增加           组帧未对齐            看 raw[0]/raw[24]；确认 0x0F+0x00
+    中间位通道不变                曾锁错载荷内 0x0F     当前已用滑动窗口+帧尾校验
+    failsafe=1                    未对频或断链          检查 R9DS 灯色与对频
+    完全无数据                    未插 SUBS 座          确认 PD2=UART5_RX、共地
+    波特率乱码                    HSE 误设 25MHz        改为 24MHz
+    rx_event_cnt 增加但通道不变   正常：中断只计数      解帧看 frame_ok_cnt
+
+
+================================================================================
+九、配置核对清单
+================================================================================
+
+    [ ] SUBS.ioc：HSE_VALUE = 24000000
+    [ ] SUBS.ioc：SYSCLK = 200000000
+    [ ] SUBS.ioc：UART5 BaudRate=100000，WordLength=9B，Even，2 Stop，RX Only
+    [ ] SUBS.ioc：UART5 RxPinLevelInvertParam = DISABLE
+    [ ] main.c：WordLength = UART_WORDLENGTH_9B
+    [ ] main.c：CLEAR_BIT(RXINV) 在 Init 与 StartDmaRx 中
+    [ ] PD2 = UART5_RX，DMA1_Stream0 Circular
+    [ ] sbus_dma_buf 在 RAM_D1（0x2400xxxx）
+    [ ] 组帧：0x0F 帧头 + 0x00 帧尾，25 字节滑动窗口
+    [ ] PE3 = USART10_TX，115200 8N1
+    [ ] PA13/PA14 保持 SWD
+    [ ] TIM2 CH1/CH3 PWM，PSC=199，ARR=19999，50Hz
+    [ ] PA0/PA2 = TIM2 PWM，对应 SBUS[0]/[3]
+    [ ] pwm.c 加入 Keil，HAL_TIM_MODULE_ENABLED
+
+
+================================================================================
+十、CubeMX 重新生成代码注意事项
+================================================================================
+
+    若从 CubeMX 重新 Generate Code，以下 USER CODE 区域需保留或重新添加：
+
+    1. main.c：#include "sbus.h"
+    2. main.c：sbus_dma_buf 的 volatile + RAM_D1 段属性
+    3. main.c：SBUS_StartDmaRx、HAL_UARTEx_RxEventCallback、HAL_UART_ErrorCallback
+    4. main.c：主循环中 SBUS_PollFromUart 与 Debug_Printf
+    5. main.c：UART5_Init 后 CLEAR_BIT(RXINV)
+    6. main.c：WordLength 保持 UART_WORDLENGTH_9B（CubeMX 已配置 9B）
+    7. 工程文件：sbus.c、pwm.c 加入 Keil 工程
+    8. 链接脚本：stm32h723xx_flash.sct 指定 RAM_D1 段
+    9. stm32h7xx_hal_conf.h：HAL_TIM_MODULE_ENABLED
+    10. TIM2：PSC=199，ARR=19999，CH1/CH3 PWM，PA0/PA2
+
+    Generate 后请核对 UART5 的 RX Invert 仍为 Disable，勿被改回 Enable。
+
+
+================================================================================
+文档结束
+================================================================================
