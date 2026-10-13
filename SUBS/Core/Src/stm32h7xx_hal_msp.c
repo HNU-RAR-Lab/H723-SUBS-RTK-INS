@@ -152,7 +152,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart)
   else if(huart->Instance==USART10)
   {
     /* USER CODE BEGIN USART10_MspInit 0 */
-    /* PE3=TX 接 USB-TTL 的 RX；PE2=RX 可选 */
+    /* PE3=TX 接 USB-TTL 的 RXD；不接 RX，PE2 保持未用 */
     /* USER CODE END USART10_MspInit 0 */
 
   /** Initializes the peripherals clock
@@ -169,25 +169,17 @@ void HAL_UART_MspInit(UART_HandleTypeDef* huart)
 
     __HAL_RCC_GPIOE_CLK_ENABLE();
     /**USART10 GPIO Configuration
-    PE2     ------> USART10_RX
-    PE3     ------> USART10_TX
+    PE3     ------> USART10_TX（只发）
     */
-    GPIO_InitStruct.Pin = GPIO_PIN_2;
-    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    GPIO_InitStruct.Alternate = GPIO_AF4_USART10;
-    HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
-
     GPIO_InitStruct.Pin = GPIO_PIN_3;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
     GPIO_InitStruct.Alternate = GPIO_AF11_USART10;
     HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
     /* USER CODE BEGIN USART10_MspInit 1 */
-
+    HAL_GPIO_DeInit(GPIOE, GPIO_PIN_2); /* 避免 CubeMX 把浮空 PE2 配成 RX */
     /* USER CODE END USART10_MspInit 1 */
   }
   else if(huart->Instance==UART7)
@@ -274,10 +266,9 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* huart)
     __HAL_RCC_USART10_CLK_DISABLE();
 
     /**USART10 GPIO Configuration
-    PE2     ------> USART10_RX
     PE3     ------> USART10_TX
     */
-    HAL_GPIO_DeInit(GPIOE, GPIO_PIN_2|GPIO_PIN_3);
+    HAL_GPIO_DeInit(GPIOE, GPIO_PIN_3);
 
     /* USER CODE BEGIN USART10_MspDeInit 1 */
 

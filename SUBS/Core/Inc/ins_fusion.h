@@ -34,8 +34,27 @@ typedef struct {
     float   vel_ned[3];      /**< 北、东、地速度，m/s */
     float   roll_deg;        /**< 滚转角，度 */
     float   pitch_deg;       /**< 俯仰角，度 */
-    float   yaw_deg;         /**< 航向角，度，真北顺时针 */
+    float   yaw_deg;         /**< 航向角，度 */
     uint8_t gnss_quality;    /**< 最近 GGA quality：4=RTK 固定，5=RTK 浮点，2=差分 */
+    uint64_t timestamp_us;          /**< 发布时间戳，Unix 微秒，与 PX4 timestamp 同格式 */
+    uint64_t timestamp_sample_us;   /**< 采样时间戳，Unix 微秒 */
+    uint8_t  xy_valid;              /**< 水平位置有效 */
+    uint8_t  z_valid;               /**< 高度有效 */
+    uint8_t  v_xy_valid;            /**< 水平速度有效 */
+    uint8_t  v_z_valid;             /**< 垂直速度有效 */
+    float    pos_ned[3];            /**< 相对原点北东地位置，米，z 向下为正 */
+    float    acc_ned[3];            /**< 北东地加速度，m/s^2（不含重力） */
+    float    heading_deg;           /**< 航向，度，[-180,+180]，0 为北 */
+    float    heading_var;           /**< 航向方差，rad^2 */
+    uint8_t  heading_good_for_control;
+    double   ref_lat_deg;           /**< 局部原点纬度 */
+    double   ref_lon_deg;
+    double   ref_alt_m;
+    float    eph;                   /**< 水平位置 1σ，米 */
+    float    epv;                   /**< 垂直位置 1σ，米 */
+    float    evh;                   /**< 水平速度 1σ，m/s */
+    float    evv;                   /**< 垂直速度 1σ，m/s */
+    uint8_t  dead_reckoning;        /**< 1：GNSS 中断后的推算航行 */
 } INS_FusionOut_t;
 
 extern INS_FusionOut_t ins_out;
@@ -48,5 +67,8 @@ void INS_Fusion_Init(void);
  * @note  距上次 IMU 步进不足 10 ms 时只解析 NMEA 后返回，不跑滤波。
  */
 void INS_Fusion_Poll(void);
+
+/** @brief USART10 以中文标识打印当前 RTK+IMU 融合结果（约 10 Hz 由主循环调用） */
+void INS_Fusion_DebugPrint(void);
 
 #endif

@@ -20,6 +20,9 @@
 #include "ins.h"
 #include "geodetic_toolbox.h"  /* DEG2RAD / RAD2DEG */
 #include <string.h>
+#include <stdio.h>
+#include <stdarg.h>
+#include <math.h>
 
 /** 对外融合结果，定义见 ins_fusion.h */
 INS_FusionOut_t ins_out;
@@ -70,6 +73,266 @@ static void rtk_sigma(uint8_t q, float hdop, float *sh, float *sv)
     case 2:  *sh = 1.0f * h; *sv = 2.0f * h; break; /* 差分等 */
     default: *sh = 2.5f * h; *sv = 5.0f * h; break; /* 单点或未知 */
     }
+}
+
+static float wrap_deg180(float deg)
+{
+    while (deg > 180.0f) {
+        deg -= 360.0f;
+    }
+    while (deg < -180.0f) {
+        deg += 360.0f;
+    }
+    return deg;
+}
+
+/* P = U*diag(d)*U'，取对角方差。U 按列优先，与 INSLIB MAT_ELEM 一致 */
+static float udu_var(int idx)
+{
+    int k;
+    int n;
+    float s;
+    float u;
+
+    n = g_ins.n;
+    if ((idx < 0) || (idx >= n)) {
+        return 0.0f;
+    }
+    s = g_ins.d[idx];
+    for (k = idx + 1; k < n; k++) {
+        u = g_ins.U[idx + k * n];
+        s += u * u * g_ins.d[k];
+    }
+    if (s < 0.0f) {
+        s = 0.0f;
+    }
+    return s;
+}
+
+static void fmt_u64(char *out, uint32_t outsz, uint64_t v)
+{
+    char tmp[24];
+    int n = 0;
+    int i;
+
+    if ((out == NULL) || (outsz < 2U)) {
+        return;
+    }
+    if (v == 0ULL) {
+        out[0] = '0';
+        out[1] = '\0';
+        return;
+    }
+    while ((v > 0ULL) && (n < 20)) {
+        tmp[n++] = (char)('0' + (unsigned)(v % 10ULL));
+        v /= 10ULL;
+    }
+    if (n >= (int)outsz) {
+        n = (int)outsz - 1;
+    }
+    for (i = 0; i < n; i++) {
+        out[i] = tmp[n - 1 - i];
+    }
+    out[n] = '\0';
+}
+
+static void ins_fusion_refresh_nav(double llh[3], float *roll, float *pitch, float *yaw)
+{
+    float pn, pe, pd;
+    float vn, ve, vd;
+    float yaw_sd;
+    float roll_sd;
+    float pitch_sd;
+    int dr_ms;
+
+    if (ins_out.ready == 0U) {
+        ins_out.xy_valid = 0U;
+        ins_out.z_valid = 0U;
+        ins_out.v_xy_valid = 0U;
+        ins_out.v_z_valid = 0U;
+        ins_out.heading_good_for_control = 0U;
+        ins_out.dead_reckoning = 0U;
+        return;
+    }
+
+    if (ins_get_latlonh(&g_ins, llh)) {
+        ins_out.lat_deg = RAD2DEG(llh[0]);
+        ins_out.lon_deg = RAD2DEG(llh[1]);
+        ins_out.h_m = llh[2];
+    }
+    (void)ins_get_velocity_ned(&g_ins, ins_out.vel_ned);
+    if (ins_get_rpy(&g_ins, roll, pitch, yaw)) {
+        ins_out.roll_deg = (float)RAD2DEG(*roll);
+        ins_out.pitch_deg = (float)RAD2DEG(*pitch);
+        ins_out.yaw_deg = (float)RAD2DEG(*yaw);
+        ins_out.heading_deg = wrap_deg180(ins_out.yaw_deg);
+    }
+    (void)ins_get_position_local(&g_ins, ins_out.pos_ned);
+    (void)ins_get_acc_n(&g_ins, ins_out.acc_ned);
+
+    ins_out.ref_lat_deg = RAD2DEG(g_ins.origin_llh[0]);
+    ins_out.ref_lon_deg = RAD2DEG(g_ins.origin_llh[1]);
+    ins_out.ref_alt_m = g_ins.origin_llh[2];
+
+    pn = udu_var(INS_IDX_POS + 0);
+    pe = udu_var(INS_IDX_POS + 1);
+    pd = udu_var(INS_IDX_POS + 2);
+    vn = udu_var(INS_IDX_VEL + 0);
+    ve = udu_var(INS_IDX_VEL + 1);
+    vd = udu_var(INS_IDX_VEL + 2);
+    ins_out.eph = sqrtf(pn + pe);
+    ins_out.epv = sqrtf(pd);
+    ins_out.evh = sqrtf(vn + ve);
+    ins_out.evv = sqrtf(vd);
+
+    if (ins_get_rpy_stddev(&g_ins, &roll_sd, &pitch_sd, &yaw_sd)) {
+        (void)roll_sd;
+        (void)pitch_sd;
+        ins_out.heading_var = yaw_sd * yaw_sd;
+        ins_out.heading_good_for_control =
+            ((yaw_sd < 0.087f) && (rtk_fix.yaw_valid != 0U)) ? 1U : 0U;
+    } else {
+        ins_out.heading_var = 0.0f;
+        ins_out.heading_good_for_control = 0U;
+    }
+
+    ins_out.xy_valid = 1U;
+    ins_out.z_valid = 1U;
+    ins_out.v_xy_valid = 1U;
+    ins_out.v_z_valid = 1U;
+
+    dr_ms = ins_deadreckoning_ms(&g_ins);
+    ins_out.dead_reckoning = ((dr_ms > 300) && (rtk_fix.pos_valid == 0U)) ? 1U : 0U;
+}
+
+/* ARMCC5 不能在字面量里写 UTF-8 汉字，用十六进制字节 */
+#define CN_TS       "\xE6\x97\xB6\xE9\x97\xB4\xE6\x88\xB3"
+#define CN_TS_SAMP  "\xE9\x87\x87\xE6\xA0\xB7\xE6\x97\xB6\xE9\x97\xB4\xE6\x88\xB3"
+#define CN_XY_VALID "\xE6\xB0\xB4\xE5\xB9\xB3\xE4\xBD\x8D\xE7\xBD\xAE\xE6\x9C\x89\xE6\x95\x88"
+#define CN_Z_VALID  "\xE9\xAB\x98\xE5\xBA\xA6\xE6\x9C\x89\xE6\x95\x88"
+#define CN_VXY_VALID "\xE6\xB0\xB4\xE5\xB9\xB3\xE9\x80\x9F\xE5\xBA\xA6\xE6\x9C\x89\xE6\x95\x88"
+#define CN_VZ_VALID "\xE5\x9E\x82\xE7\x9B\xB4\xE9\x80\x9F\xE5\xBA\xA6\xE6\x9C\x89\xE6\x95\x88"
+#define CN_X        "\xE5\x8C\x97\xE5\x90\x91\xE4\xBD\x8D\xE7\xBD\xAE"
+#define CN_Y        "\xE4\xB8\x9C\xE5\x90\x91\xE4\xBD\x8D\xE7\xBD\xAE"
+#define CN_Z        "\xE5\x9C\xB0\xE5\x90\x91\xE4\xBD\x8D\xE7\xBD\xAE"
+#define CN_VX       "\xE5\x8C\x97\xE5\x90\x91\xE9\x80\x9F\xE5\xBA\xA6"
+#define CN_VY       "\xE4\xB8\x9C\xE5\x90\x91\xE9\x80\x9F\xE5\xBA\xA6"
+#define CN_VZ       "\xE5\x9C\xB0\xE5\x90\x91\xE9\x80\x9F\xE5\xBA\xA6"
+#define CN_AX       "\xE5\x8C\x97\xE5\x90\x91\xE5\x8A\xA0\xE9\x80\x9F\xE5\xBA\xA6"
+#define CN_AY       "\xE4\xB8\x9C\xE5\x90\x91\xE5\x8A\xA0\xE9\x80\x9F\xE5\xBA\xA6"
+#define CN_AZ       "\xE5\x9C\xB0\xE5\x90\x91\xE5\x8A\xA0\xE9\x80\x9F\xE5\xBA\xA6"
+#define CN_HDG      "\xE8\x88\xAA\xE5\x90\x91"
+#define CN_HDG_VAR  "\xE8\x88\xAA\xE5\x90\x91\xE6\x96\xB9\xE5\xB7\xAE"
+#define CN_HDG_CTL  "\xE8\x88\xAA\xE5\x90\x91\xE5\x8F\xAF\xE7\x94\xA8\xE4\xBA\x8E\xE6\x8E\xA7\xE5\x88\xB6"
+#define CN_REF_LAT  "\xE5\x8E\x9F\xE7\x82\xB9\xE7\xBA\xAC\xE5\xBA\xA6"
+#define CN_REF_LON  "\xE5\x8E\x9F\xE7\x82\xB9\xE7\xBB\x8F\xE5\xBA\xA6"
+#define CN_REF_ALT  "\xE5\x8E\x9F\xE7\x82\xB9\xE9\xAB\x98\xE5\xBA\xA6"
+#define CN_EPH      "\xE6\xB0\xB4\xE5\xB9\xB3\xE4\xBD\x8D\xE7\xBD\xAE\xE7\xB2\xBE\xE5\xBA\xA6"
+#define CN_EPV      "\xE5\x9E\x82\xE7\x9B\xB4\xE4\xBD\x8D\xE7\xBD\xAE\xE7\xB2\xBE\xE5\xBA\xA6"
+#define CN_EVH      "\xE6\xB0\xB4\xE5\xB9\xB3\xE9\x80\x9F\xE5\xBA\xA6\xE7\xB2\xBE\xE5\xBA\xA6"
+#define CN_EVV      "\xE5\x9E\x82\xE7\x9B\xB4\xE9\x80\x9F\xE5\xBA\xA6\xE7\xB2\xBE\xE5\xBA\xA6"
+#define CN_DR       "\xE6\x8E\xA8\xE7\xAE\x97\xE8\x88\xAA\xE8\xA1\x8C"
+#define CN_YES      "\xE6\x98\xAF"
+#define CN_NO       "\xE5\x90\xA6"
+#define CN_ROLL     "\xE6\xBB\x9A\xE8\xBD\xAC"
+#define CN_PITCH    "\xE4\xBF\xAF\xE4\xBB\xB0"
+#define CN_READY    "\xE8\x9E\x8D\xE5\x90\x88\xE5\xB0\xB1\xE7\xBB\xAA"
+#define CN_RAW_LAT  "\xE5\x8E\x9F\xE5\xA7\x8B\xE7\xBA\xAC\xE5\xBA\xA6"
+#define CN_RAW_LON  "\xE5\x8E\x9F\xE5\xA7\x8B\xE7\xBB\x8F\xE5\xBA\xA6"
+#define CN_RAW_ALT  "\xE5\x8E\x9F\xE5\xA7\x8B\xE6\xB5\xB7\xE6\x8B\x94"
+#define CN_QUAL     "\xE5\xAE\x9A\xE4\xBD\x8D\xE8\xB4\xA8\xE9\x87\x8F"
+#define CN_RXB      "\xE6\x8E\xA5\xE6\x94\xB6\xE5\xAD\x97\xE8\x8A\x82"
+#define CN_SATS     "\xE5\x8F\x82\xE4\xB8\x8E\xE8\xA7\xA3\xE7\xAE\x97\xE5\x8D\xAB\xE6\x98\x9F\xE6\x95\xB0"
+#define CN_HDOP     "\xE6\xB0\xB4\xE5\xB9\xB3\xE7\xB2\xBE\xE5\xBA\xA6\xE5\x9B\xA0\xE5\xAD\x90"
+#define CN_SNR      "\xE6\x8E\xA5\xE6\x94\xB6\xE5\xBC\xBA\xE5\xBA\xA6"
+#define CN_SNR_MAX  "\xE6\x9C\x80\xE5\xBC\xBA\xE6\x8E\xA5\xE6\x94\xB6"
+
+static const char *cn_yn(uint8_t v)
+{
+    return (v != 0U) ? CN_YES : CN_NO;
+}
+
+/* 经纬度非 0 时在数值后加 N/S、E/W；为 0 时不加方位 */
+static void fmt_latlon(char *out, uint32_t outsz, double deg, char pos_h, char neg_h)
+{
+    if (deg == 0.0) {
+        (void)snprintf(out, outsz, "%.8f", 0.0);
+    } else if (deg > 0.0) {
+        (void)snprintf(out, outsz, "%.8f, %c", deg, pos_h);
+    } else {
+        (void)snprintf(out, outsz, "%.8f, %c", -deg, neg_h);
+    }
+}
+
+static void fusion_print_line(const char *fmt, ...)
+{
+    char line[320];
+    va_list ap;
+    int n;
+
+    va_start(ap, fmt);
+    n = vsnprintf(line, sizeof(line), fmt, ap);
+    va_end(ap);
+    if (n < 0) {
+        return;
+    }
+    if (n >= (int)sizeof(line)) {
+        n = (int)sizeof(line) - 1;
+    }
+    Debug_Write((uint8_t *)line, (uint16_t)n);
+}
+
+void INS_Fusion_DebugPrint(void)
+{
+    char ts[24];
+    char ts_s[24];
+    char lat_s[28];
+    char lon_s[28];
+    char raw_lat[28];
+    char raw_lon[28];
+
+    ins_out.timestamp_us = RTK_UnixNowUs();
+    fmt_u64(ts, sizeof(ts), ins_out.timestamp_us);
+    fmt_u64(ts_s, sizeof(ts_s), ins_out.timestamp_sample_us);
+    fmt_latlon(lat_s, sizeof(lat_s), ins_out.ref_lat_deg, 'N', 'S');
+    fmt_latlon(lon_s, sizeof(lon_s), ins_out.ref_lon_deg, 'E', 'W');
+    fmt_latlon(raw_lat, sizeof(raw_lat), rtk_fix.lat_deg, 'N', 'S');
+    fmt_latlon(raw_lon, sizeof(raw_lon), rtk_fix.lon_deg, 'E', 'W');
+
+    /* 拆成多行，避免单帧 >512 字节时 ARMCC5 snprintf 返回 -1 整包丢弃 */
+    fusion_print_line(CN_TS ": %s " CN_TS_SAMP ": %s " CN_READY ": %s\r\n",
+                      ts, ts_s, cn_yn(ins_out.ready));
+    /* 仅打印 RTK 已有量：GGA 卫星数/HDOP，GSV 载噪比。无干扰、增益字段 */
+    fusion_print_line(CN_SATS ": %u " CN_HDOP ": %.1f " CN_SNR ": %.1f " CN_SNR_MAX ": %u\r\n",
+                      (unsigned)rtk_fix.sats, rtk_fix.hdop,
+                      rtk_fix.snr_avg, (unsigned)rtk_fix.snr_max);
+    /* 原始 GGA，不看融合是否就绪。接收字节不增加说明 UART7 没数 */
+    fusion_print_line(CN_RAW_LAT ": %s " CN_RAW_LON ": %s " CN_RAW_ALT ": %.3f "
+                      CN_QUAL ": %u " CN_RXB ": %lu GGA:%lu\r\n",
+                      raw_lat, raw_lon, rtk_fix.alt_m,
+                      (unsigned)rtk_fix.quality,
+                      (unsigned long)rtk_fix.rx_bytes,
+                      (unsigned long)rtk_fix.gga_cnt);
+    fusion_print_line(CN_XY_VALID ": %s " CN_Z_VALID ": %s " CN_VXY_VALID ": %s " CN_VZ_VALID ": %s\r\n",
+                      cn_yn(ins_out.xy_valid), cn_yn(ins_out.z_valid),
+                      cn_yn(ins_out.v_xy_valid), cn_yn(ins_out.v_z_valid));
+    fusion_print_line(CN_X ": %.3f " CN_Y ": %.3f " CN_Z ": %.3f "
+                      CN_VX ": %.3f " CN_VY ": %.3f " CN_VZ ": %.3f\r\n",
+                      ins_out.pos_ned[0], ins_out.pos_ned[1], ins_out.pos_ned[2],
+                      ins_out.vel_ned[0], ins_out.vel_ned[1], ins_out.vel_ned[2]);
+    fusion_print_line(CN_AX ": %.3f " CN_AY ": %.3f " CN_AZ ": %.3f "
+                      CN_ROLL ": %.1f " CN_PITCH ": %.1f "
+                      CN_HDG ": %.2f " CN_HDG_VAR ": %.6f " CN_HDG_CTL ": %s\r\n",
+                      ins_out.acc_ned[0], ins_out.acc_ned[1], ins_out.acc_ned[2],
+                      ins_out.roll_deg, ins_out.pitch_deg,
+                      ins_out.heading_deg, ins_out.heading_var,
+                      cn_yn(ins_out.heading_good_for_control));
+    fusion_print_line(CN_REF_LAT ": %s " CN_REF_LON ": %s " CN_REF_ALT ": %.3f "
+                      CN_EPH ": %.3f " CN_EPV ": %.3f " CN_EVH ": %.3f " CN_EVV ": %.3f "
+                      CN_DR ": %s\r\n\r\n",
+                      lat_s, lon_s, ins_out.ref_alt_m,
+                      ins_out.eph, ins_out.epv, ins_out.evh, ins_out.evv,
+                      cn_yn(ins_out.dead_reckoning));
 }
 
 /**
@@ -238,18 +501,7 @@ void INS_Fusion_Poll(void)
     /* 捷联预测 + 本步有效量测的 ESKF 更新 */
     ins_update(&g_ins, &m);
 
+    ins_out.timestamp_sample_us = RTK_UnixNowUs();
     ins_out.ready = ins_is_ready(&g_ins) ? 1U : 0U;
-    if (ins_out.ready != 0U) {
-        if (ins_get_latlonh(&g_ins, llh)) {
-            ins_out.lat_deg = RAD2DEG(llh[0]);
-            ins_out.lon_deg = RAD2DEG(llh[1]);
-            ins_out.h_m = llh[2];
-        }
-        (void)ins_get_velocity_ned(&g_ins, ins_out.vel_ned);
-        if (ins_get_rpy(&g_ins, &roll, &pitch, &yaw)) {
-            ins_out.roll_deg = (float)RAD2DEG(roll);
-            ins_out.pitch_deg = (float)RAD2DEG(pitch);
-            ins_out.yaw_deg = (float)RAD2DEG(yaw);
-        }
-    }
+    ins_fusion_refresh_nav(llh, &roll, &pitch, &yaw);
 }

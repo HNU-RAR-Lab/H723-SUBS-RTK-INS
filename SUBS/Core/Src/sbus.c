@@ -149,6 +149,41 @@ void SBUS_PollFromUart(UART_HandleTypeDef *huart, const volatile uint8_t *buf, u
     SBUS_OnDmaIdle(buf, buf_len, dma_pos);
 }
 
+void Debug_Write(const uint8_t *data, uint16_t len)
+{
+    uint16_t i;
+    uint32_t t0;
+
+    if ((data == NULL) || (len == 0U)) {
+        return;
+    }
+
+    /* 不走 HAL_UART_Transmit：超时后 gState 会停在 BUSY_TX，
+     * 80ms 超时又发不出 600 字节中文帧，USB-TTL 的 RXD 灯会完全不闪。 */
+    huart10.ErrorCode = HAL_UART_ERROR_NONE;
+    huart10.gState = HAL_UART_STATE_READY;
+    __HAL_UART_CLEAR_FLAG(&huart10, UART_CLEAR_PEF | UART_CLEAR_FEF |
+                          UART_CLEAR_NEF | UART_CLEAR_OREF);
+    ATOMIC_SET_BIT(huart10.Instance->CR1, USART_CR1_UE | USART_CR1_TE);
+    ATOMIC_CLEAR_BIT(huart10.Instance->CR1, USART_CR1_RE);
+
+    for (i = 0U; i < len; i++) {
+        t0 = HAL_GetTick();
+        while ((huart10.Instance->ISR & USART_ISR_TXE_TXFNF) == 0U) {
+            if ((HAL_GetTick() - t0) > 5U) {
+                return;
+            }
+        }
+        huart10.Instance->TDR = (uint32_t)data[i];
+    }
+    t0 = HAL_GetTick();
+    while ((huart10.Instance->ISR & USART_ISR_TC) == 0U) {
+        if ((HAL_GetTick() - t0) > 5U) {
+            break;
+        }
+    }
+}
+
 void Debug_Printf(const char *fmt, ...)
 {
     char buffer[256];
@@ -165,5 +200,5 @@ void Debug_Printf(const char *fmt, ...)
     if (len > (int)sizeof(buffer)) {
         len = (int)sizeof(buffer);
     }
-    HAL_UART_Transmit(&huart10, (uint8_t *)buffer, (uint16_t)len, HAL_MAX_DELAY);
+    Debug_Write((uint8_t *)buffer, (uint16_t)len);
 }

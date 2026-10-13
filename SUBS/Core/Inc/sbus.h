@@ -52,6 +52,7 @@ void SBUS_FeedByte(uint8_t byte);
 void SBUS_OnDmaIdle(const volatile uint8_t *buf, uint16_t buf_len, uint16_t dma_pos);
 void SBUS_PollFromUart(UART_HandleTypeDef *huart, const volatile uint8_t *buf, uint16_t buf_len);
 void Debug_Printf(const char *fmt, ...);
+void Debug_Write(const uint8_t *data, uint16_t len);
 
 extern SBUS_Data_t sbus_data;
 extern SBUS_Debug_t sbus_dbg;
