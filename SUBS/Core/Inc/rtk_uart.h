@@ -1,7 +1,7 @@
 /**
   ******************************************************************************
   * @file    rtk_uart.h
-  * @brief   UART7 接收 RTK/GNSS 模块 NMEA（GGA/RMC），供 INS 松耦合
+  * @brief   UART7 接收 RTK NMEA 与 #UNIHEADINGA，供 INS 松耦合
   * @note    RTK 用 USB 独立供电，不接 UART7 座 VCC。
   *          模块 TX → PE7(RX)，模块 RX → PE8(TX，可选)，GND 必须共地。
   *          115200 8N1
@@ -29,13 +29,14 @@ typedef struct {
     uint8_t snr_max;       /* GSV 载噪比峰值，dB-Hz */
     uint8_t pos_valid;
     uint8_t vel_valid;
-    uint8_t yaw_valid;     /* 双天线真北航向有效 */
+    uint8_t yaw_valid;     /* 双天线真北航向有效（HDT/THS） */
     float  yaw_deg;        /* 双天线航向，度，真北顺时针 0～360 */
+    uint32_t yaw_tick_ms;  /* 最近一次有效航向的 HAL_GetTick */
     uint32_t gga_cnt;
     uint32_t rmc_cnt;
-    uint32_t hdt_cnt;      /* HDT/THS 解析次数 */
+    uint32_t hdt_cnt;      /* HDT/THS/UNIHEADINGA 解析次数 */
     uint32_t rx_bytes;     /* UART 收到的字节数，为 0 说明没接到数 */
-    uint32_t line_cnt;     /* 收到的以 $ 开头的行 */
+    uint32_t line_cnt;     /* 收到的 $ 或 # 开头的行 */
     uint32_t cs_fail;      /* 校验失败的行 */
     uint16_t dma_pos;      /* DMA 写入位置，有数时会走动 */
     uint8_t  last_byte;    /* 最近一个字节 */

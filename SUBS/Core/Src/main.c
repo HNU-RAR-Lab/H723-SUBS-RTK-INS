@@ -166,7 +166,7 @@ int main(void)
             pwm_sync.sbus_rx_us, pwm_sync.pwm_out_us, pwm_sync.dt_us,
             sbus_data.frame_lost, sbus_data.failsafe);
       }
-      /* UART10：RTK+IMU 融合结果，中文标识，时间戳为 Unix 微秒 */
+      /* UART10：融合结果；航向为 RTK 双天线真北，不打印融合 yaw */
       INS_Fusion_DebugPrint();
     }
   }

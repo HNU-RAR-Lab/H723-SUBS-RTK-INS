@@ -1,7 +1,7 @@
 /**
   ******************************************************************************
   * @file    rtk_uart.c
-  * @brief   UART7 DMA 循环收 NMEA，解析 GGA 位置与 RMC 速度
+  * @brief   UART7 DMA 循环收 NMEA 与 #UNIHEADINGA
   *          PE7=RX、PE8=TX；模块 USB 供电，不接板载 VCC
   ******************************************************************************
   */
@@ -341,24 +341,105 @@ static void parse_rmc(const char *s)
     rtk_fix.rmc_cnt++;
 }
 
-static void parse_hdt(const char *s)
+static void rtk_accept_yaw(float deg)
 {
-    char hdg[24];
-    float deg;
-
-    nmea_field(s, 1, hdg, sizeof(hdg));
-    if (hdg[0] == '\0') {
-        rtk_fix.yaw_valid = 0U;
-        return;
-    }
-    deg = (float)atof(hdg);
     if ((deg < 0.0f) || (deg > 360.0f)) {
         rtk_fix.yaw_valid = 0U;
         return;
     }
     rtk_fix.yaw_deg = deg;
     rtk_fix.yaw_valid = 1U;
+    rtk_fix.yaw_tick_ms = HAL_GetTick();
     rtk_fix.hdt_cnt++;
+}
+
+static void parse_hdt(const char *s)
+{
+    char hdg[24];
+
+    nmea_field(s, 1, hdg, sizeof(hdg));
+    if (hdg[0] == '\0') {
+        rtk_fix.yaw_valid = 0U;
+        return;
+    }
+    rtk_accept_yaw((float)atof(hdg));
+}
+
+/* 和芯星通 CRC32：对 '#' 与 '*' 之间的字符计算，初值 0，多项式 0xEDB88320 */
+static uint32_t unicore_crc32(const uint8_t *buf, uint32_t len)
+{
+    uint32_t crc = 0U;
+    uint32_t i;
+    uint32_t b;
+
+    for (i = 0U; i < len; i++) {
+        crc ^= buf[i];
+        for (b = 0U; b < 8U; b++) {
+            if ((crc & 1U) != 0U) {
+                crc = (crc >> 1) ^ 0xEDB88320UL;
+            } else {
+                crc >>= 1;
+            }
+        }
+    }
+    return crc;
+}
+
+static int unicore_crc_ok(const char *s)
+{
+    const char *star;
+    uint32_t crc;
+    uint32_t got;
+    int i;
+    int nib;
+
+    if (s[0] != '#') {
+        return 0;
+    }
+    star = strchr(s, '*');
+    if ((star == NULL) || (star <= (s + 1))) {
+        return 0;
+    }
+    crc = unicore_crc32((const uint8_t *)(s + 1), (uint32_t)(star - (s + 1)));
+    got = 0U;
+    for (i = 1; i <= 8; i++) {
+        nib = hex_nibble(star[i]);
+        if (nib < 0) {
+            return 0;
+        }
+        got = (got << 4) | (uint32_t)nib;
+    }
+    return (crc == got) ? 1 : 0;
+}
+
+/* #UNIHEADINGA：分号后为 解状态,解类型,基线,航向,俯仰,... 航向为真北顺时针 */
+static void parse_uniheadinga(const char *s)
+{
+    const char *body;
+    char sol[24];
+    char typ[24];
+    char hdg[24];
+
+    if (!unicore_crc_ok(s)) {
+        rtk_fix.cs_fail++;
+        return;
+    }
+    body = strchr(s, ';');
+    if (body == NULL) {
+        rtk_fix.yaw_valid = 0U;
+        return;
+    }
+    body++;
+    nmea_field(body, 0, sol, sizeof(sol));
+    nmea_field(body, 1, typ, sizeof(typ));
+    nmea_field(body, 3, hdg, sizeof(hdg));
+    if ((strcmp(sol, "SOL_COMPUTED") != 0) ||
+        ((strcmp(typ, "NARROW_INT") != 0) && (strcmp(typ, "NARROW_FLOAT") != 0)) ||
+        (hdg[0] == '\0')) {
+        rtk_fix.yaw_valid = 0U;
+        return;
+    }
+    rtk_accept_yaw((float)atof(hdg));
 }
 
 static void parse_ths(const char *s)
@@ -385,6 +466,12 @@ static void nmea_handle_line(char *line)
         rtk_fix.last_nmea[i] = line[i];
     }
     rtk_fix.last_nmea[i] = '\0';
+    if (line[0] == '#') {
+        if (strstr(line, "HEADINGA") != NULL) {
+            parse_uniheadinga(line);
+        }
+        return;
+    }
     if (!nmea_checksum_ok(line)) {
         rtk_fix.cs_fail++;
         return;
@@ -419,7 +506,7 @@ static void nmea_feed(uint8_t b)
         return;
     }
     if (nmea_len < (sizeof(nmea_line) - 1U)) {
-        if ((nmea_len == 0U) && (b != '$')) {
+        if ((nmea_len == 0U) && (b != '$') && (b != '#')) {
             return;
         }
         nmea_line[nmea_len++] = (char)b;

@@ -44,8 +44,8 @@ typedef struct {
     uint8_t  v_z_valid;             /**< 垂直速度有效 */
     float    pos_ned[3];            /**< 相对原点北东地位置，米，z 向下为正 */
     float    acc_ned[3];            /**< 北东地加速度，m/s^2（不含重力） */
-    float    heading_deg;           /**< 航向，度，[-180,+180]，0 为北 */
-    float    heading_var;           /**< 航向方差，rad^2 */
+    float    heading_deg;           /**< 融合航向，度，[-180,+180]。USART10 不打印本字段 */
+    float    heading_var;           /**< 融合航向方差，rad^2 */
     uint8_t  heading_good_for_control;
     double   ref_lat_deg;           /**< 局部原点纬度 */
     double   ref_lon_deg;
@@ -68,7 +68,7 @@ void INS_Fusion_Init(void);
  */
 void INS_Fusion_Poll(void);
 
-/** @brief USART10 以中文标识打印当前 RTK+IMU 融合结果（约 10 Hz 由主循环调用） */
+/** @brief USART10 打印融合结果；航向为 RTK 双天线真北（HDT/THS），不打印融合 yaw */
 void INS_Fusion_DebugPrint(void);
 
 #endif

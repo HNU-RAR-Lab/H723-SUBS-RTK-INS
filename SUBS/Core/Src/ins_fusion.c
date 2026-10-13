@@ -9,6 +9,7 @@
   * 同一条 NMEA 用 gga_cnt / rmc_cnt / hdt_cnt 去重，避免重复融合。
   *
   * 滤波本身在 INSLIB（15 状态 ESKF，UDU 协方差）。本文件只组 ins_measurements_t。
+ * USART10 的航向打印取 HDT/THS 或 #UNIHEADINGA 真北航向，不取融合 yaw。
   ******************************************************************************
   */
 
@@ -221,9 +222,11 @@ static void ins_fusion_refresh_nav(double llh[3], float *roll, float *pitch, flo
 #define CN_AX       "\xE5\x8C\x97\xE5\x90\x91\xE5\x8A\xA0\xE9\x80\x9F\xE5\xBA\xA6"
 #define CN_AY       "\xE4\xB8\x9C\xE5\x90\x91\xE5\x8A\xA0\xE9\x80\x9F\xE5\xBA\xA6"
 #define CN_AZ       "\xE5\x9C\xB0\xE5\x90\x91\xE5\x8A\xA0\xE9\x80\x9F\xE5\xBA\xA6"
-#define CN_HDG      "\xE8\x88\xAA\xE5\x90\x91"
-#define CN_HDG_VAR  "\xE8\x88\xAA\xE5\x90\x91\xE6\x96\xB9\xE5\xB7\xAE"
-#define CN_HDG_CTL  "\xE8\x88\xAA\xE5\x90\x91\xE5\x8F\xAF\xE7\x94\xA8\xE4\xBA\x8E\xE6\x8E\xA7\xE5\x88\xB6"
+#define CN_RTK_HDG  "RTK\xE8\x88\xAA\xE5\x90\x91"
+#define CN_HDG_OK   "\xE8\x88\xAA\xE5\x90\x91\xE6\x9C\x89\xE6\x95\x88"
+
+/* 超过该间隔没有新的 HDT/THS，打印标为无效，避免停更后仍像活航向 */
+#define RTK_HDG_STALE_MS  2000U
 #define CN_REF_LAT  "\xE5\x8E\x9F\xE7\x82\xB9\xE7\xBA\xAC\xE5\xBA\xA6"
 #define CN_REF_LON  "\xE5\x8E\x9F\xE7\x82\xB9\xE7\xBB\x8F\xE5\xBA\xA6"
 #define CN_REF_ALT  "\xE5\x8E\x9F\xE7\x82\xB9\xE9\xAB\x98\xE5\xBA\xA6"
@@ -250,6 +253,18 @@ static void ins_fusion_refresh_nav(double llh[3], float *roll, float *pitch, flo
 static const char *cn_yn(uint8_t v)
 {
     return (v != 0U) ? CN_YES : CN_NO;
+}
+
+/* 双天线真北航向：只认最近一帧 HDT/THS，与融合 yaw、融合是否就绪无关 */
+static uint8_t rtk_heading_live(void)
+{
+    uint32_t age;
+
+    if (rtk_fix.yaw_valid == 0U) {
+        return 0U;
+    }
+    age = HAL_GetTick() - rtk_fix.yaw_tick_ms;
+    return (age <= RTK_HDG_STALE_MS) ? 1U : 0U;
 }
 
 /* 经纬度非 0 时在数值后加 N/S、E/W；为 0 时不加方位 */
@@ -321,12 +336,13 @@ void INS_Fusion_DebugPrint(void)
                       ins_out.pos_ned[0], ins_out.pos_ned[1], ins_out.pos_ned[2],
                       ins_out.vel_ned[0], ins_out.vel_ned[1], ins_out.vel_ned[2]);
     fusion_print_line(CN_AX ": %.3f " CN_AY ": %.3f " CN_AZ ": %.3f "
-                      CN_ROLL ": %.1f " CN_PITCH ": %.1f "
-                      CN_HDG ": %.2f " CN_HDG_VAR ": %.6f " CN_HDG_CTL ": %s\r\n",
+                      CN_ROLL ": %.1f " CN_PITCH ": %.1f\r\n",
                       ins_out.acc_ned[0], ins_out.acc_ned[1], ins_out.acc_ned[2],
-                      ins_out.roll_deg, ins_out.pitch_deg,
-                      ins_out.heading_deg, ins_out.heading_var,
-                      cn_yn(ins_out.heading_good_for_control));
+                      ins_out.roll_deg, ins_out.pitch_deg);
+    /* 真北 0～360°，来自 HDT/THS 或 #UNIHEADINGA；融合未就绪时同样打印 */
+    fusion_print_line(CN_RTK_HDG ": %.2f " CN_HDG_OK ": %s HDG:%lu\r\n",
+                      rtk_fix.yaw_deg, cn_yn(rtk_heading_live()),
+                      (unsigned long)rtk_fix.hdt_cnt);
     fusion_print_line(CN_REF_LAT ": %s " CN_REF_LON ": %s " CN_REF_ALT ": %.3f "
                       CN_EPH ": %.3f " CN_EPV ": %.3f " CN_EVH ": %.3f " CN_EVV ": %.3f "
                       CN_DR ": %s\r\n\r\n",
