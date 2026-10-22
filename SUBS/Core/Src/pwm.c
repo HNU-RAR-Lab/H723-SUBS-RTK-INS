@@ -7,9 +7,12 @@
   *   右操纵杆：channels_norm[0] → TIM2_CH1 / PA0
   *   左操纵杆：channels_norm[3] → TIM2_CH3 / PA2
   *
-  * 占空比：左满舵：-1 → 0%，居中：0 → 50%，右满舵：+1 → 100%
-  * 频率：50Hz（周期 20ms）
-  *
+ * 推进器脉宽（50Hz，高电平）：
+ *   -1 → 1.0ms 反转满舵，0 → 1.5ms 停转，+1 → 2.0ms 正转满舵
+ * 通道8（实测约 -0.966 / +0.985）：
+ *   >0 手动，PWM 跟随 channels_norm[0]、[3]
+ *   ≤0 暂不动作，两路停在 1.5ms；程序控制以后改 PWM_ApplyProgram()
+ *
   * 时间戳：SBUS 解帧与 CCR 更新共用 HAL_GetTick 与 DWT 微秒计数，
   *         主循环在 Poll 之后立即 Sync，使两路时间戳对齐到同一帧。
   ******************************************************************************
@@ -41,9 +44,7 @@ static void PWM_EnableDwt(void)
 
 static uint32_t PWM_NormToPulse(float norm)
 {
-    const uint32_t counts = PWM_TIM_PERIOD + 1U;
-    float duty;
-    uint32_t pulse;
+    float pulse;
 
     if (norm > 1.0f) {
         norm = 1.0f;
@@ -52,13 +53,20 @@ static uint32_t PWM_NormToPulse(float norm)
         norm = -1.0f;
     }
 
-    /* duty = (norm + 1) / 2  →  [-1,0,+1] 对应 [0, 0.5, 1.0] */
-    duty = (norm + 1.0f) * 0.5f;
-    pulse = (uint32_t)(duty * (float)counts + 0.5f);
-    if (pulse > counts) {
-        pulse = counts;
+    /* 1MHz 计数时 CCR 就是高电平微秒数：1500 + norm*500 */
+    pulse = (float)PWM_PULSE_NEUTRAL_US + norm * (float)PWM_PULSE_HALF_SPAN_US;
+    if (pulse >= 0.0f) {
+        pulse += 0.5f;
+    } else {
+        pulse -= 0.5f;
     }
-    return pulse;
+    if (pulse < (float)PWM_PULSE_MIN_US) {
+        return PWM_PULSE_MIN_US;
+    }
+    if (pulse > (float)PWM_PULSE_MAX_US) {
+        return PWM_PULSE_MAX_US;
+    }
+    return (uint32_t)pulse;
 }
 
 static void PWM_WriteCompare(uint32_t ch, uint32_t pulse)
@@ -66,12 +74,25 @@ static void PWM_WriteCompare(uint32_t ch, uint32_t pulse)
     __HAL_TIM_SET_COMPARE(&htim2, ch, pulse);
 }
 
+/* 通道8实测正档约 +0.985。大于 0 视为手动遥控。 */
+static uint8_t PWM_IsManual(float mode_norm)
+{
+    return (mode_norm > 0.0f) ? 1U : 0U;
+}
+
+/* 通道8为负（实测约 -0.966）时走这里。当前只停转，后续改为程序给出的脉宽。 */
+static void PWM_ApplyProgram(uint32_t *pulse0, uint32_t *pulse1)
+{
+    *pulse0 = PWM_PULSE_NEUTRAL_US;
+    *pulse1 = PWM_PULSE_NEUTRAL_US;
+}
+
 void PWM_Init(void)
 {
     PWM_EnableDwt();
 
-    pwm_sync.pulse[0] = PWM_PULSE_50_PERCENT;
-    pwm_sync.pulse[1] = PWM_PULSE_50_PERCENT;
+    pwm_sync.pulse[0] = PWM_PULSE_NEUTRAL_US;
+    pwm_sync.pulse[1] = PWM_PULSE_NEUTRAL_US;
 
     if (HAL_TIM_PWM_Start(&htim2, TIM_CHANNEL_1) != HAL_OK) {
         Error_Handler();
@@ -80,12 +101,12 @@ void PWM_Init(void)
         Error_Handler();
     }
 
-    /* 预装载 CCR，占空比在周期边界更新，避免毛刺 */
+    /* 预装载 CCR，脉宽在周期边界更新。上电先停转（1.5ms） */
     __HAL_TIM_ENABLE_OCxPRELOAD(&htim2, TIM_CHANNEL_1);
     __HAL_TIM_ENABLE_OCxPRELOAD(&htim2, TIM_CHANNEL_3);
 
-    PWM_WriteCompare(TIM_CHANNEL_1, PWM_PULSE_50_PERCENT);
-    PWM_WriteCompare(TIM_CHANNEL_3, PWM_PULSE_50_PERCENT);
+    PWM_WriteCompare(TIM_CHANNEL_1, PWM_PULSE_NEUTRAL_US);
+    PWM_WriteCompare(TIM_CHANNEL_3, PWM_PULSE_NEUTRAL_US);
 }
 
 void PWM_SyncFromSbus(void)
@@ -106,8 +127,13 @@ void PWM_SyncFromSbus(void)
     pwm_sync.sbus_rx_tick_ms = sbus_data.rx_tick_ms;
     pwm_sync.sbus_rx_us = sbus_data.rx_us;
 
-    pulse0 = PWM_NormToPulse(sbus_data.channels_norm[0]);
-    pulse1 = PWM_NormToPulse(sbus_data.channels_norm[3]);
+    pwm_sync.manual = PWM_IsManual(sbus_data.channels_norm[8]);
+    if (pwm_sync.manual != 0U) {
+        pulse0 = PWM_NormToPulse(sbus_data.channels_norm[0]);
+        pulse1 = PWM_NormToPulse(sbus_data.channels_norm[3]);
+    } else {
+        PWM_ApplyProgram(&pulse0, &pulse1);
+    }
 
     PWM_WriteCompare(TIM_CHANNEL_1, pulse0);
     PWM_WriteCompare(TIM_CHANNEL_3, pulse1);

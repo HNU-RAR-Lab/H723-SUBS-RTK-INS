@@ -189,14 +189,15 @@
     Prescaler                 199（计数时钟 = 200MHz / 200 = 1MHz）
     Counter Period (ARR)      19999（1MHz / 20000 = 50Hz）
     Auto-reload preload       Enable
-    Pulse（初始）             10000（50% 占空比）
+    Pulse（初始）             1500（1.5ms，推进器停转）
     PWM mode                  PWM1，极性 High
     引脚                      PA0=CH1←SBUS[0]，PA2=CH3←SBUS[3]
 
-    占空比映射（pwm.c）：
-      channels_norm = -1 → Pulse = 0      → 0%
-      channels_norm =  0 → Pulse = 10000  → 50%
-      channels_norm = +1 → Pulse = 20000  → 100%
+    推进器脉宽（pwm.c，CCR 单位 us）：
+      channels_norm = -1 → 1000us（1.0ms，反转）
+      channels_norm =  0 → 1500us（1.5ms，停转）
+      channels_norm = +1 → 2000us（2.0ms，正转）
+      中间线性，脉宽限制在 1.0～2.0ms，周期仍为 20ms
 
 3.7 CubeMX 初始化顺序
 

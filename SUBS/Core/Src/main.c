@@ -7,7 +7,7 @@
  * 达妙 DM-MC02 + Radiolink R9DS：
  *   UART5  PD2  接收 SBUS（100000，8E2，板载硬件反相，软件 RXINV 关）
  *   USART10 PE3 调试打印到电脑（115200，8N1）
- *   TIM2   PA0/PA2  50Hz PWM，对应 channels_norm[0]/[3]
+ *   TIM2   PA0/PA2  50Hz 推进器 PWM，脉宽 1.0～2.0ms，对应 channels_norm[0]/[3]
   ******************************************************************************
   * @attention
   *
@@ -155,13 +155,16 @@ int main(void)
       if (sbus_data.updated) {
         sbus_data.updated = 0;
         /* channels_norm：中位 0.0，摇杆两端约 -1.0 / +1.0
+         * [8]：拨杆，约 -0.966 不跟随摇杆，约 +0.985 手动
          * FL=丢帧标志，FS=失控保护（遥控器断电或超出距离时为 1）
          * [0]：右操纵杆左/右，[3]：左操纵杆左/右 */
         Debug_Printf(
-            "N1:%+.2f N4:%+.2f PWM:%lu/%lu "
+            "N1:%+.2f N4:%+.2f N9:%+.2f MAN:%u PWM_us:%lu/%lu "
             "RX:%lu PWM_T:%lu dT:%ld FL:%u FS:%u\r\n",
             sbus_data.channels_norm[0],
             sbus_data.channels_norm[3],
+            sbus_data.channels_norm[8],
+            pwm_sync.manual,
             pwm_sync.pulse[0], pwm_sync.pulse[1],
             pwm_sync.sbus_rx_us, pwm_sync.pwm_out_us, pwm_sync.dt_us,
             sbus_data.frame_lost, sbus_data.failsafe);
@@ -235,7 +238,7 @@ void SystemClock_Config(void)
   * @brief  TIM2 两路 PWM：内部时钟，50Hz
   * @note   APB1 分频后定时器时钟为 200MHz；PSC=199 → 1MHz；ARR=19999 → 20ms
   *         PA0=CH1←SBUS[0]，PA2=CH3←SBUS[3]
-  *         初始 Pulse=10000 为 50% 占空比
+  *         1 计数 = 1us；初始 Pulse=1500，推进器停转
   */
 static void MX_TIM2_Init(void)
 {
@@ -267,7 +270,7 @@ static void MX_TIM2_Init(void)
     Error_Handler();
   }
   sConfigOC.OCMode = TIM_OCMODE_PWM1;
-  sConfigOC.Pulse = PWM_PULSE_50_PERCENT;
+  sConfigOC.Pulse = PWM_PULSE_NEUTRAL_US;
   sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
   sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
   if (HAL_TIM_PWM_ConfigChannel(&htim2, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)

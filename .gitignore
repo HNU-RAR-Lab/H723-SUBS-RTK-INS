@@ -1,14 +1,16 @@
-# Keil MDK build output
+# 克隆后应能直接打开 SUBS/MDK-ARM/SUBS.uvprojx 并编译。
+# 下列内容必须保留在版本库中，不要加入本文件：
+#   SUBS/Core、SUBS/Drivers、SUBS/MDK-ARM/*.uvprojx、*.uvoptx
+#   启动文件 *.s、分散加载 *.sct、DebugConfig、RTE
+#   Middlewares/INSLIB 的 .c/.h（滤波源码；不含其内部 .git）
+
+# Keil 编译输出（本机重新生成）
 SUBS/MDK-ARM/SUBS/
-SUBS/MDK-ARM/*.uvguix.*
-SUBS/MDK-ARM/*.lst
-SUBS/MDK-ARM/rebuild_log.txt
-SUBS/MDK-ARM/JLinkLog.txt
-*.uvguix.*
-*.bak
-*.crf
+SUBS/MDK-ARM/Listings/
+SUBS/MDK-ARM/Objects/
 *.o
 *.d
+*.crf
 *.axf
 *.hex
 *.bin
@@ -17,15 +19,27 @@ SUBS/MDK-ARM/JLinkLog.txt
 *.lnp
 *.htm
 *.dep
+*.lst
+*.iex
 ExtDll.iex
 
-# Nested INSLIB clone metadata (source files are still tracked)
+# Keil 个人界面与本机日志（不影响他人打开工程）
+*.uvguix.*
+*.bak
+SUBS/MDK-ARM/rebuild_log.txt
+SUBS/MDK-ARM/JLinkLog.txt
+JLinkLog.txt
+*.log
+
+# INSLIB 是源码副本，不要把上游仓库的 .git 再提交一次
 Middlewares/INSLIB/.git/
 Middlewares/INSLIB/_git_nested/
 
-# Cube/Keil downloaded packs
+# Cube / Keil 软件包缓存，与工程源码无关
 pack_download/
 
-# OS
+# 系统杂项
 Thumbs.db
+Desktop.ini
 .DS_Store
+.vs/
